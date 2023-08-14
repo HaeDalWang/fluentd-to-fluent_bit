@@ -1,0 +1,194 @@
+global:
+  namespaceOverride: amazon-cloudwatch
+
+# serviceAccount:
+#   create: true
+#   annotations: 
+#     iam.amazonaws.com/role: arn:aws:iam::863422182520:role/fluentbit-to-CloudWatch
+
+env:
+- name: AWS_REGION
+  value: ap-northeast-2
+- name: CLUSTER_NAME
+  value: bsd
+- name: READ_FROM_HEAD
+  value: "True"
+- name: READ_FROM_TAIL
+  value: "On"
+
+service:
+  extraService: |
+    Log_Level                 info
+    Daemon                    off
+    Log_Level                 info
+    HTTP_Server               On
+    HTTP_Listen               0.0.0.0
+    HTTP_Port                 2020
+
+  extraParsers: |
+    [PARSER]
+        Name                container_firstline
+        Format              regex
+        Regex               (?<log>(?<="log":")\S(?!\.).*?)(?<!\\)".*(?<stream>(?<="stream":").*?)".*(?<time>\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}\.\w*).*(?=})
+        Time_Key            time
+        Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
+
+    [PARSER]
+        Name                cwagent_firstline
+        Format              regex
+        Regex               (?<log>(?<="log":")\d{4}[\/-]\d{1,2}[\/-]\d{1,2}[ T]\d{2}:\d{2}:\d{2}(?!\.).*?)(?<!\\)".*(?<stream>(?<="stream":").*?)".*(?<time>\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}\.\w*).*(?=})
+        Time_Key            time
+        Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
+input:
+  enabled: false
+additionalInputs: |
+  [INPUT]
+      Name                tail
+      Tag                 application.*
+      Exclude_Path        /var/log/containers/cloudwatch-agent*, /var/log/containers/fluent-bit*
+      Path                /var/log/containers/*.log
+      Parser              docker
+      Mem_Buf_Limit       128MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Rotate_Wait         30
+      Read_from_Head      ${READ_FROM_HEAD}
+  [INPUT]
+      Name                tail
+      Tag                 application.*
+      Path                /var/log/containers/fluent-bit*
+      Parser              docker
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      ${READ_FROM_HEAD}
+  [INPUT]
+      Name                tail
+      Tag                 application.*
+      Path                /var/log/containers/cloudwatch-agent*
+      Docker_Mode         On
+      Docker_Mode_Flush   5
+      Docker_Mode_Parser  cwagent_firstline
+      Parser              docker
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      ${READ_FROM_HEAD}
+
+  [INPUT]
+      Name                systemd
+      Tag                 dataplane.systemd.*
+      Systemd_Filter      _SYSTEMD_UNIT=docker.service
+      Systemd_Filter      _SYSTEMD_UNIT=containerd.service
+      Systemd_Filter      _SYSTEMD_UNIT=kubelet.service
+      Path                /var/log/journal
+      Read_From_Tail      ${READ_FROM_TAIL}
+
+  [INPUT]
+      Name                tail
+      Tag                 host.dmesg
+      Path                /var/log/dmesg
+      Parser              syslog-rfc3164
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      ${READ_FROM_HEAD}
+  [INPUT]
+      Name                tail
+      Tag                 host.messages
+      Path                /var/log/messages
+      Parser              syslog-rfc3164
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      ${READ_FROM_HEAD}
+  [INPUT]
+      Name                tail
+      Tag                 host.secure
+      Path                /var/log/secure
+      Parser              syslog-rfc3164
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      ${READ_FROM_HEAD}
+
+filter:
+  enabled: false
+additionalFilters: |
+  [FILTER]
+      Name                kubernetes
+      Match               application.*
+      Kube_URL            https://kubernetes.default.svc:443
+      Kube_Tag_Prefix     application.var.log.containers.
+      Merge_Log           On
+      Merge_Log_Key       log_processed
+      K8S-Logging.Parser  On
+      K8S-Logging.Exclude Off
+      Annotations         Off
+      Buffer_Size         64KB
+  [FILTER]
+      Name                nest
+      Match               application.*
+      Operation           lift
+      Nested_under        kubernetes
+      Add_prefix          Nested.
+  [FILTER]
+      Name                modify
+      Match               application.*
+      Rename              Nested.docker_id            Docker.container_id
+  [FILTER]
+      Name                nest
+      Match               application.*
+      Operation           nest
+      Wildcard            Nested.*
+      Nested_under        kubernetes
+      Remove_prefix       Nested.
+  [FILTER]
+      Name                nest
+      Match               application.*
+      Operation           nest
+      Wildcard            Docker.*
+      Nested_under        docker
+      Remove_prefix       Docker.
+
+  [FILTER]
+      Name                modify
+      Match               dataplane.systemd.*
+      Rename              _HOSTNAME                   hostname
+      Rename              _SYSTEMD_UNIT               systemd_unit
+      Rename              MESSAGE                     message
+      Remove_regex        ^((?!hostname|systemd_unit|message).)*$
+  [FILTER]
+      Name                aws
+      Match               dataplane.*
+      imds_version        v2
+
+  [FILTER]
+      Name                aws
+      Match               host.*
+      imds_version        v2
+
+cloudWatchLogs:
+  enabled: false
+additionalOutputs: |
+  [OUTPUT]
+      Name                cloudwatch_logs
+      Match               application.*
+      region              ${AWS_REGION}
+      log_group_name      /aws/containerinsights/${CLUSTER_NAME}/application
+      log_stream_prefix   ${HOSTNAME}-
+      auto_create_group   true
+  [OUTPUT]
+      Name                cloudwatch_logs
+      Match               dataplane.systemd.*
+      region              ${AWS_REGION}
+      log_group_name      /aws/containerinsights/${CLUSTER_NAME}/dataplane
+      log_stream_prefix   ${HOSTNAME}-
+      auto_create_group   true
+  [OUTPUT]
+      Name                cloudwatch_logs
+      Match               host.*
+      region              ${AWS_REGION}
+      log_group_name      /aws/containerinsights/${CLUSTER_NAME}/host
+      log_stream_prefix   ${HOSTNAME}.
+      auto_create_group   true

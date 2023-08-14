@@ -1,0 +1,6 @@
+global:
+  namespaceOverride: amazon-cloudwatch
+
+cloudWatchLogs:
+  enabled: true
+  region: "ap-northeast-2"
